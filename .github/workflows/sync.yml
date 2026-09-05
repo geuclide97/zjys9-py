@@ -5,9 +5,6 @@ on:
     # 每 6 小时同步一次（UTC 时间）
     - cron: "0 */6 * * *"
   workflow_dispatch: {}   # 支持手动触发
-  push:
-    paths:
-      - "sync.py"          # sync.py 变更时也跑一次自检
 
 permissions:
   contents: write
