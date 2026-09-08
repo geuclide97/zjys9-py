@@ -32,3 +32,11 @@ jobs:
         with:
           commit_message: "sync: 从上游自动更新"
           commit_author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+
+      - name: Notify haitun
+        run: |
+          curl -s -X POST \
+            -H "Authorization: token ${{ secrets.HAITUN_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/geuclide97/haitun/dispatches \
+            -d '{"event_type":"zjys9-updated"}'
