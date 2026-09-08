@@ -1,5 +1,19 @@
 # -*- coding: utf-8 -*-
-# 橘汁视频 TVBox spider
+"""
+橘汁视频 UI9专用Python爬虫
+格式完全对齐华谊模板，支持extend后台改域名UA
+依赖：pycryptodome
+UI9配置JSON：
+{
+  "key": "juzhi_py",
+  "name": "橘汁视频",
+  "type": 3,
+  "api": "./py/juzhi.py",
+  "searchable": 1,
+  "quickSearch": 1,
+  "filterable": 0
+}
+"""
 import json
 import re
 import sys
@@ -10,14 +24,25 @@ import random
 import hashlib
 import urllib.request
 import urllib.parse
-from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_v1_5, AES
-from Crypto.Util.Padding import pad, unpad
+import ssl
 
+# 加密库容错
 try:
-    from base.spider import Spider as _Base
+    from Crypto.PublicKey import RSA
+    from Crypto.Cipher import PKCS1_v1_5, AES
+    from Crypto.Util.Padding import pad, unpad
 except Exception:
-    class _Base:
+    RSA = None
+    PKCS1_v1_5 = None
+    AES = None
+    pad = None
+    unpad = None
+
+# UI9父类兜底，无base.spider不报错
+try:
+    from base.spider import Spider as BaseSpider
+except Exception:
+    class BaseSpider(object):
         pass
 
 PUB1_B64 = 'MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCr8SzZhjYy+rsya1K09t8d2K50pWFoBkgUqMpKOiW+3IEVKd4eTdvg9RSOjQ82kypL6R9BnsmrS1V8s4PVDwjQbUtYhTPPC9Hz16qY7rpD6m0d2vr09/UpWQ5uOy9PR0QTrsioveZ+DIe9jc3C+zBCu/kZSY/R8stwJoiitki3gwIDAQAB'
@@ -28,8 +53,6 @@ CERT_MD5 = '090DA8F91D3F60CC6CB250D86F06FE12'
 CERT_SHA1 = '3DADB42485B7F864E766479ADA6B1176D81D8D73'
 PKG = 'com.mxj.wylcjbxyx'
 VC = '3023'
-HOST = 'https://juziapp.hzhcbkj.cn'
-UA = 'okhttp/3.12.1'
 
 _e = base64.b64encode(AES.new(PW_SAFE, AES.MODE_ECB).encrypt(pad(
     (CERT_MD5 + '######' + CERT_SHA1 + '~~~~~~' + PKG + '>>>+++' + VC).encode(), 16))).decode()
@@ -60,27 +83,38 @@ def _pb(buf):
     i = 0
     n = len(buf)
     while i < n:
-        b = buf[i]; fn, wt = b >> 3, b & 7; i += 1
+        b = buf[i]
+        fn, wt = b >> 3, b & 7
+        i += 1
         if wt == 0:
-            v = 0; sh = 0
+            v = 0
+            sh = 0
             while i < n:
-                x = buf[i]; i += 1
-                v |= (x & 0x7f) << sh; sh += 7
+                x = buf[i]
+                i += 1
+                v |= (x & 0x7f) << sh
+                sh += 7
                 if not x & 0x80:
                     break
             out.append((fn, wt, v))
         elif wt == 2:
-            ln = 0; sh = 0
+            ln = 0
+            sh = 0
             while i < n:
-                x = buf[i]; i += 1
-                ln |= (x & 0x7f) << sh; sh += 7
+                x = buf[i]
+                i += 1
+                ln |= (x & 0x7f) << sh
+                sh += 7
                 if not x & 0x80:
                     break
-            out.append((fn, wt, buf[i:i + ln])); i += ln
+            out.append((fn, wt, buf[i:i + ln]))
+            i += ln
         elif wt == 5:
-            out.append((fn, wt, buf[i:i + 4])); i += 4
+            out.append((fn, wt, buf[i:i + 4]))
+            i += 4
         elif wt == 1:
-            out.append((fn, wt, buf[i:i + 8])); i += 8
+            out.append((fn, wt, buf[i:i + 8]))
+            i += 8
         else:
             i += 1
     return out
@@ -91,44 +125,87 @@ def _rnd(k):
     return ''.join(random.sample(list(CH), k - 1)) + '='
 
 
-class Spider(_Base):
-    HOST_NAME = '橘汁视频'
+class Spider(BaseSpider):
+    # UI9默认扩展配置，后台extend可JSON覆盖
+    DEFAULT_EXT = {
+        "host": "https://juziapp.hzhcbkj.cn",
+        "ua": "okhttp/3.12.1"
+    }
 
     def getName(self):
-        return '橘汁视频'
+        return "橘汁视频"
 
-    _cur_id = ''
-
-    def init(self, extend=''):
-        self.udid = hashlib.md5(str(time.time()).encode()).hexdigest()[:16].upper()
-        self._rsa1 = PKCS1_v1_5.new(RSA.import_key(base64.b64decode(PUB1_B64)))
-        self._rsa2 = None
-        self._token = ''
-        self._login()
-        self._zone()
-
-    def _http(self, url, data=None, headers=None):
-        req = urllib.request.Request(url, data=data, headers=headers or {})
-        import ssl
-        ctx = ssl._create_unverified_context()
-        return urllib.request.urlopen(req, timeout=25, context=ctx).read()
-
-    def _login(self):
-        try:
-            body = json.dumps({'username': 'tv_%s' % self.udid[:10].lower(),
-                               'password': hashlib.md5(('tv' + self.udid).encode()).hexdigest(),
-                               'udid': self.udid}).encode()
+    def init(self, extend=""):
+        print("【橘汁】开始初始化")
+        # 加载扩展配置
+        self.ext = dict(self.DEFAULT_EXT)
+        if isinstance(extend, dict):
+            self.ext.update(extend)
+        elif isinstance(extend, str) and extend.strip():
             try:
-                self._http(HOST + '/api/ex/v3/user/register', body, {
-                    'User-Agent': UA, 'Content-Type': 'application/json'})
+                cfg = json.loads(extend)
+                if isinstance(cfg, dict):
+                    self.ext.update(cfg)
             except Exception:
                 pass
-            d = self._http(HOST + '/api/ex/v3/user/login', body, {
-                'User-Agent': UA, 'Content-Type': 'application/json'})
-            data = json.loads(d).get('data') or {}
-            self._token = (data.get('token') or (data.get('user') or {}).get('token') or '')
+        self.HOST = self.ext["host"].rstrip("/")
+        self.UA = self.ext["ua"]
+
+        self.udid = hashlib.md5(str(time.time()).encode()).hexdigest()[:16].upper()
+        self._rsa1 = None
+        self._rsa2 = None
+        self._token = ''
+        self._cur_id = ''
+
+        # 加密库检测
+        if not RSA or not PKCS1_v1_5 or not AES or not pad or not unpad:
+            print("【橘汁】缺少pycryptodome依赖，爬虫无法工作")
+            return
+        try:
+            self._rsa1 = PKCS1_v1_5.new(RSA.import_key(base64.b64decode(PUB1_B64)))
+            print("【橘汁】rsa1加载成功")
+        except Exception as e:
+            print("【橘汁】rsa1初始化失败", e)
+            return
+        # 登录、获取公钥
+        try:
+            self._login()
+        except Exception as e:
+            print("【橘汁】登录异常", e)
+        try:
+            self._zone()
+            if self._rsa2:
+                print("【橘汁】✅ rsa2公钥获取成功，可以正常加载列表")
+            else:
+                print("【橘汁】❌ rsa2为空，protobuf接口全部失效，只有分类能显示")
+        except Exception as e:
+            print("【橘汁】zone公钥获取异常", e)
+
+    def _http(self, url, data=None, headers=None):
+        req_headers = {"User-Agent": self.UA}
+        if headers:
+            req_headers.update(headers)
+        req = urllib.request.Request(url, data=data, headers=req_headers)
+        ctx = ssl._create_unverified_context()
+        resp = urllib.request.urlopen(req, timeout=25, context=ctx)
+        return resp.read()
+
+    def _login(self):
+        body = json.dumps({
+            'username': 'tv_%s' % self.udid[:10].lower(),
+            'password': hashlib.md5(('tv' + self.udid).encode()).hexdigest(),
+            'udid': self.udid
+        }).encode()
+        try:
+            self._http(self.HOST + '/api/ex/v3/user/register', body, {
+                'Content-Type': 'application/json'})
         except Exception:
-            self._token = ''
+            pass
+        d = self._http(self.HOST + '/api/ex/v3/user/login', body, {
+            'Content-Type': 'application/json'})
+        j = json.loads(d)
+        data = j.get('data') or {}
+        self._token = (data.get('token') or (data.get('user') or {}).get('token') or '')
 
     def _zone(self):
         ts = int(time.time() * 1000)
@@ -142,8 +219,8 @@ class Spider(_Base):
              'udid': self.udid, 'uuid': self.udid, 'chid': '10000',
              'androidID': self.udid, 'net': '1', 'young': 0, 'tenantId': '*',
              'v': 1, 'device': 0, 'lang': 'zh', 'country': 'CN', 'cpu': 'arm64-v8a'}
-        d = self._http(HOST + '/api/v5/find/app/zone', body, {
-            'User-Agent': UA, 'Content-Type': 'application/x-protobuf',
+        d = self._http(self.HOST + '/api/v5/find/app/zone', body, {
+            'Content-Type': 'application/x-protobuf',
             'Accept': 'application/x-protobuf', 'Cache-Control': 'no-cache',
             'publicParams': json.dumps(P, separators=(',', ':'))})
         top = _pb(d)
@@ -171,7 +248,7 @@ class Spider(_Base):
              'androidID': self.udid}
         blob = json.dumps(J, separators=(',', ':'), ensure_ascii=False).encode()
         pd_hex = AES.new(NATIVE_K, AES.MODE_CBC, NATIVE_K).encrypt(pad(blob, 16)).hex()
-        h = {'User-Agent': UA, 'Accept': 'application/json',
+        h = {'User-Agent': self.UA, 'Accept': 'application/json',
              'Cache-Control': 'no-cache',
              'publicParams': json.dumps({'paramsData': pd_hex}, separators=(',', ':'))}
         if self._token:
@@ -189,33 +266,49 @@ class Spider(_Base):
                 _f(3, 2, _rnd(20).encode()) + _f(4, 0, _varint(ts)) +
                 _f(5, 2, rnd8.encode()))
 
-    def homeContent(self, f):
+    @staticmethod
+    def _video_item(item):
+        if not isinstance(item, dict):
+            return {}
+        return {
+            "vod_id": item.get("vod_id", ""),
+            "vod_name": item.get("vod_name", ""),
+            "vod_pic": item.get("vod_pic", ""),
+            "vod_remarks": item.get("vod_remarks", "")
+        }
+
+    def homeContent(self, filter):
         cats = []
         try:
-            d = self._http(HOST + '/api/v3/drama/getCategory?orderBy=type_id',
-                           None, {'User-Agent': UA, 'Accept': 'application/json'})
-            for c in (json.loads(d).get('data') or []):
+            d = self._http(self.HOST + '/api/v3/drama/getCategory?orderBy=type_id',
+                           None, {'User-Agent': self.UA, 'Accept': 'application/json'})
+            arr = json.loads(d).get('data') or []
+            for c in arr:
                 if str(c.get('id')) != '29':
                     cats.append({'type_id': str(c['id']),
                                  'type_name': c.get('name', '')})
-        except Exception:
-            pass
+        except Exception as e:
+            print("【橘汁】homeContent分类获取失败", e)
         if not cats:
-            cats = [{'type_id': '21', 'type_name': '电影'},
-                    {'type_id': '22', 'type_name': '剧集'},
-                    {'type_id': '25', 'type_name': '动漫'},
-                    {'type_id': '26', 'type_name': '综艺'},
-                    {'type_id': '27', 'type_name': '短剧'},
-                    {'type_id': '28', 'type_name': '漫剧'}]
+            cats = [
+                {'type_id': '21', 'type_name': '电影'},
+                {'type_id': '22', 'type_name': '剧集'},
+                {'type_id': '25', 'type_name': '动漫'},
+                {'type_id': '26', 'type_name': '综艺'},
+                {'type_id': '27', 'type_name': '短剧'},
+                {'type_id': '28', 'type_name': '漫剧'}
+            ]
         cats.append({'type_id': 'history', 'type_name': '最近在看'})
-        return {'class': cats}
+        return {"class": cats, "filters": {}}
 
     def homeVideoContent(self):
-        return {'list': self._list('page=1&pagesize=24')}
+        raw = self._list('page=1&pagesize=24')
+        list_out = [self._video_item(i) for i in raw]
+        return {"list": list_out}
 
     def _vodids(self):
         try:
-            d = self._http(HOST + '/api/ex/v3/security/tag/list', None, self._hdr())
+            d = self._http(self.HOST + '/api/ex/v3/security/tag/list', None, self._hdr())
             tags = json.loads(d).get('data') or []
             ids = []
             for t in tags:
@@ -228,11 +321,14 @@ class Spider(_Base):
 
     def _list(self, qs):
         out = []
+        if not self._rsa2:
+            print("【橘汁】_rsa2为空，跳过列表请求")
+            return out
         try:
             hh = self._hdr()
             hh['Content-Type'] = 'application/x-protobuf'
             hh['Accept'] = 'application/x-protobuf'
-            d = self._http(HOST + '/api/proto/v5/drama/category',
+            d = self._http(self.HOST + '/api/proto/v5/drama/category',
                            self._secure(qs), hh)
             top = _pb(d)
             code = [v for fn, wt, v in top if fn == 1 and wt == 0]
@@ -260,25 +356,28 @@ class Spider(_Base):
                         info['vod_remarks'] = v2.decode('utf-8', 'replace')
                 if info['vod_id']:
                     out.append(info)
-        except Exception:
-            pass
+        except Exception as e:
+            print("【橘汁】_list接口异常", e)
         return out
 
-    def categoryContent(self, tid, pg, f, ext):
+    def categoryContent(self, tid, pg, filter, extend):
         pg = int(pg or 1)
         if tid == 'history':
-            return {'list': self._history_list(), 'page': 1,
+            his = self._history_list()
+            return {'list': [self._video_item(x) for x in his], 'page': 1,
                     'pagecount': 1, 'limit': 40, 'total': 40}
         qs = 'page=%d&pagesize=24&typeId1=%s' % (pg, tid)
-        return {'list': self._list(qs), 'page': pg,
-                'pagecount': 999, 'limit': 24, 'total': 99999}
+        lst = self._list(qs)
+        return {"list": [self._video_item(i) for i in lst],
+                "page": pg, "pagecount": 999, "limit": 24, "total": 99999}
 
     def _history_list(self):
         out = []
         try:
-            d = self._http(HOST + '/api/ex/v3/user/history?username=fzcrym',
-                           None, {'User-Agent': UA, 'Accept': 'application/json'})
-            for it in (json.loads(d).get('data') or []):
+            d = self._http(self.HOST + '/api/ex/v3/user/history?username=fzcrym',
+                           None, {'User-Agent': self.UA, 'Accept': 'application/json'})
+            arr = json.loads(d).get('data') or []
+            for it in arr:
                 vid = it.get('videoId', '')
                 if '|' in vid:
                     frm, url = vid.split('|', 1)
@@ -288,32 +387,40 @@ class Spider(_Base):
                         'vod_pic': it.get('videoCover', ''),
                         'vod_remarks': '%s·第%s集' % (frm, it.get('videoPart', '')),
                     })
-        except Exception:
-            pass
+        except Exception as e:
+            print("【橘汁】历史记录异常", e)
         return out
 
     def detailContent(self, ids):
-        out = {'vod_id': ids[0]}
-        self._cur_id = ids[0]
-        if ids[0].startswith('h$'):
-            _, frm, url = ids[0].split('$', 2)
-            return {'list': [dict(out, vod_name='继续观看',
-                                   vod_play_from=frm,
-                                   vod_play_url='正片$%s' % url,
-                                   vod_pic='',
-                                   vod_content='播放历史·线路:' + frm)]}
+        result = {"list": []}
+        vid = ids[0].split(',')[0].strip()
+        self._cur_id = vid
+        if vid.startswith('h$'):
+            _, frm, url = vid.split('$', 2)
+            result["list"].append({
+                "vod_id": vid,
+                "vod_name": "继续观看",
+                "vod_play_from": frm,
+                "vod_play_url": "正片$%s" % url,
+                "vod_pic": "",
+                "vod_content": "播放历史·线路:" + frm
+            })
+            return result
+        if not self._rsa2:
+            return result
         try:
             hh = self._hdr()
             hh['Content-Type'] = 'application/x-protobuf'
             hh['Accept'] = 'application/x-protobuf'
-            d = self._http(HOST + '/api/proto/v5/drama/getDetail',
-                           self._secure('id=' + ids[0]), hh)
+            d = self._http(self.HOST + '/api/proto/v5/drama/getDetail',
+                           self._secure('id=' + vid), hh)
             top = _pb(d)
             data = [v for fn, wt, v in top if fn == 3 and wt == 2][0]
             dd = _pb(data)
+            out = {"vod_id": vid}
             for fn, wt, v in dd:
                 if fn == 0 or fn > 100:
-                    break  # protobuf 错位起点, 之后全是字符串碎片(乱码源)
+                    break
                 if fn == 9 and wt == 2 and 'vod_name' not in out:
                     out['vod_name'] = v.decode('utf-8', 'replace')
                 elif fn == 1 and wt == 2 and 'vod_area' not in out:
@@ -325,29 +432,22 @@ class Spider(_Base):
                 elif fn == 25 and wt == 2 and 'vod_actor' not in out:
                     out['vod_actor'] = v.decode('utf-8', 'replace')
                 elif fn == 6 and wt == 2 and 'vod_content' not in out:
-                    out['vod_content'] = re.sub(
-                        r'<[^>]+>', '', v.decode('utf-8', 'replace'))
+                    out['vod_content'] = re.sub(r'<[^>]+>', '', v.decode('utf-8', 'replace'))
                 elif fn == 2 and wt == 2 and 'vod_pic' not in out:
                     cands = [v3.decode('utf-8', 'replace')
                              for f3, w3, v3 in _pb(v)
                              if w3 == 2 and v3.startswith(b'http')]
                     if cands:
-                        out['vod_pic'] = next(
-                            (u for u in cands if u.startswith('https')),
-                            cands[0])
-            # 演员兜底: f16/f25 无值时从错位块的干净中文串提取
+                        out['vod_pic'] = next((u for u in cands if u.startswith('https')), cands[0])
             if 'vod_actor' not in out:
                 for fn, wt, v in dd:
                     if fn == 0 and wt == 2:
                         txt = v.decode('utf-8', 'replace')
-                        names = re.findall(
-                            r'[\u4e00-\u9fa5·]{2,12}(?::?,)'
-                            r'?[一-龥·]{2,12}', txt)
+                        names = re.findall(r'[\u4e00-\u9fa5·]{2,12}(?::?,)?[一-龥·]{2,12}', txt)
                         cand = [x for x in names if len(x) >= 4]
                         if cand:
                             out['vod_actor'] = ','.join(cand[:6])
                             break
-            # f29 分集: 详情响应 _pb 会错位, 用原始 0xEA01 tag 扫描
             eps = []
             pos = 0
             n = len(data)
@@ -387,7 +487,6 @@ class Spider(_Base):
                         src_cn = v3_.decode('utf-8', 'replace')
                 if not pth:
                     continue
-                # 集名归一化: "第01集"/"第01集完结"→"1"
                 mm = re.match(r'^第?0*(\d{1,4})[集话期](?:完结)?$', title)
                 if mm:
                     title = mm.group(1)
@@ -406,15 +505,7 @@ class Spider(_Base):
                         {'vodPlayFrom': src, 'playUrl': pth},
                         separators=(',', ':')).encode()).decode()
                 lines[line].append('%s$%s' % (title or '正片', ep_url))
-            # 集名归一化: "第01集"→"1", 纯数字保留, 其他保留原名
-            for ln_name in lines:
-                norm = []
-                for it in lines[ln_name]:
-                    t, u = it.split('$', 1)
-                    mm = re.match(r'^第?0*(\d{1,4})[集话期]$', t)
-                    norm.append('%s$%s' % (mm.group(1) if mm else t, u))
-                lines[ln_name] = norm
-            # 线路排序: 超高清最前, 蓝光按名, 其余殿后
+
             def _rank(nm):
                 if '超高清' in nm:
                     return 0
@@ -422,44 +513,43 @@ class Spider(_Base):
                     return 1
                 return 2
             order.sort(key=lambda x: (_rank(x), x))
-            out['_lines'] = order
-            out['_lines_map'] = lines
-            lines = out.pop('_lines', [])
-            lmap = out.pop('_lines_map', {})
             if lines:
-                out['vod_play_from'] = '$$$'.join(lines)
-                out['vod_play_url'] = '$$$'.join(
-                    '#'.join(lmap[l]) for l in lines)
+                out['vod_play_from'] = '$$$'.join(order)
+                out['vod_play_url'] = '$$$'.join('#'.join(lines[l]) for l in order)
             else:
                 out['vod_play_from'] = '橘汁'
                 out['vod_play_url'] = '暂无片源$http://'
-        except Exception:
-            out['vod_name'] = ids[0]
-            out['vod_play_from'] = '橘汁'
-            out['vod_play_url'] = '播放$http://'
-        return {'list': [out]}
+            result["list"].append(out)
+        except Exception as e:
+            print("【橘汁】detailContent异常", e)
+        return result
 
+    # UI9双搜索函数，和华谊模板对齐
     def searchContent(self, key, quick, pg=1):
+        return self.searchContentPage(key, quick, pg)
+
+    def searchContentPage(self, key, quick, pg="1"):
+        out_list = []
+        if not self._rsa2:
+            return {"list": out_list, "page": int(pg)}
         try:
             hh = self._hdr()
             hh['Content-Type'] = 'application/x-protobuf'
             hh['Accept'] = 'application/x-protobuf'
             qs = 'page=%s&pagesize=24&searchKeys=%s' % (pg or 1, key)
-            d = self._http(HOST + '/api/proto/v5/drama/search',
+            d = self._http(self.HOST + '/api/proto/v5/drama/search',
                            self._secure(qs), hh)
             top = _pb(d)
             code = [v for fn, wt, v in top if fn == 1 and wt == 0]
             if (code[0] if code else 0) != 200:
-                return {'list': [], 'page': int(pg or 1)}
+                return {"list": out_list, "page": int(pg)}
             datas = [v for fn, wt, v in top if fn == 3 and wt == 2]
             if not datas:
-                return {'list': [], 'page': int(pg or 1)}
-            out = []
+                return {"list": out_list, "page": int(pg)}
             for fn, wt, v in _pb(datas[0]):
                 if wt != 2 or fn == 0 or fn > 100:
                     continue
-                item = {'vod_id': '', 'vod_name': '', 'vod_pic': '',
-                        'vod_remarks': ''}
+                item = {'vod_id': '', 'vod_name': '', 'vod_pic': '', 'vod_remarks': ''}
                 for f3, w3, v3 in _pb(v):
                     if w3 != 2 and not (f3 == 3 and w3 == 0):
                         continue
@@ -469,7 +559,6 @@ class Spider(_Base):
                         elif f3 == 5:
                             item['vod_name'] = v3.decode('utf-8', 'replace')
                         elif f3 == 2:
-                            # 海报 b64串: 取内部http
                             cands = [x.decode('utf-8', 'replace')
                                      for _, w4, x in _pb(v3)
                                      if w4 == 2 and x.startswith(b'http')]
@@ -479,16 +568,13 @@ class Spider(_Base):
                                     cands[0])
                         elif f3 == 13:
                             item['vod_remarks'] = v3.decode('utf-8', 'replace')
-                        elif f3 == 4:
-                            item['vod_content'] = v3.decode(
-                                'utf-8', 'replace')[:100]
                     except Exception:
                         pass
                 if item['vod_id'] and item['vod_name']:
-                    out.append(item)
-            return {'list': out, 'page': int(pg or 1)}
-        except Exception:
-            return {'list': [], 'page': 1}
+                    out_list.append(self._video_item(item))
+        except Exception as e:
+            print("【橘汁】搜索异常", e)
+        return {"list": out_list, "page": int(pg), "pagecount": 1, "limit": 24, "total": len(out_list)}
 
     def playerContent(self, flag, id, vipFlags):
         url = id
@@ -501,30 +587,33 @@ class Spider(_Base):
                 hh['Accept'] = 'application/x-protobuf'
                 qs = 'vodPlayFrom=%s&playUrl=%s' % (
                     urllib.parse.quote(pf), urllib.parse.quote(pu, safe=''))
-                d = self._http(HOST + '/api/proto/v5/videoUsableUrl',
+                d = self._http(self.HOST + '/api/proto/v5/videoUsableUrl',
                                self._secure(qs), hh)
                 top = _pb(d)
                 code = [v for fn, wt, v in top if fn == 1 and wt == 0]
                 if (code[0] if code else 0) == 200:
                     data = [v for fn, wt, v in top if fn == 3 and wt == 2]
                     if data:
-                        mm = re.search(rb'https?://[\x21-\x7e]+',
-                                       data[0])
+                        mm = re.search(rb'https?://[\x21-\x7e]+', data[0])
                         if mm:
-                            url = mm.group(0).decode(
-                                'utf-8', 'replace')
-            elif not url.startswith('http'):
-                url = 'http://'
+                            url = mm.group(0).decode('utf-8', 'replace')
         except Exception:
             pass
-        return {'parse': 0, 'playUrl': '', 'url': url,
-                'header': {'User-Agent': UA}}
+        return {"parse": 0, "playUrl": "", "url": url, "header": {"User-Agent": self.UA}}
 
     def isVideoFormat(self, url):
-        return True
+        return bool(re.search(r"(?i)\.(m3u8|mp4|mkv|ts|flv)(\?|$)", str(url)))
 
-    def isTextFormat(self, url):
+    def manualVideoCheck(self):
         return False
+
+    def localProxy(self, param=''):
+        return [404, "text/plain", "NotFound"]
 
     def destroy(self):
         pass
+
+
+if __name__ == '__main__':
+    sp = Spider()
+    sp.init()
