@@ -1,26 +1,6 @@
 # coding=utf-8
 # !/usr/bin/python
 # by嗷呜(finally)
-#
-# ============================ 优化说明 ============================
-# [修复1] "高清-官方线路B" 只有码流没有画面
-#   原因: playerContent 里的预检请求
-#         self.fetch(url, headers=..., allow_redirects=False)
-#         底层的 requests 默认 stream=False, 会把响应体完整读进内存。
-#         而 B 线路解析出来的是 toutiaovod 的直链 MP4(单集约 337MB),
-#         于是播放器拿到地址前必须先等这 337MB 下载完(实测约 268 秒),
-#         表现就是"一直在缓冲/有码流但没有画面"。
-#         其他线路都是几十 KB 的 m3u8, 预检瞬间完成, 所以只有 B 线路会犯病。
-#   修法: 加 stream=True, 只读响应头, 不再吞响应体; 顺带把 ['Location']
-#         换成 .get('Location') 并显式关闭连接。
-#
-# [修复2] vod_play_from 与 vod_play_url 的顺序错位隐患
-#   原代码把名字一次性全部 append, 播放列表却是"先内联的、后异步的",
-#   两者顺序一旦不一致就会串台(标签页点开是别的线路的剧集)。
-#   现在改成按索引成对构建, 顺序永远对齐。
-#
-# [排序]  线路顺序: 4K → 无水印 → 官方线路-C → 其余保持接口原顺序
-# ================================================================
 import sys
 import os
 sys.path.append("..")
@@ -37,19 +17,6 @@ from base64 import b64encode, b64decode
 import json
 import time
 from base.spider import Spider
-
-# ---- 线路置顶顺序(按此列表从前到后), 未列出的线路保持接口原顺序 ----
-# 匹配规则: 忽略大小写、空格、连字符、下划线、括号后做"包含"匹配;
-#          每条线路只会被占用一次, 所以 "4K-官方线路C" 会先被 "4K" 抢走,
-#          不会又被 "官方线路-C" 重复匹配。
-# 想改顺序直接调这个列表即可, 例如让修好的高清B排第一:
-#   SOURCE_PRIORITY = ["4K", "无水印", "高清-官方线路B", "官方线路-C"]
-SOURCE_PRIORITY = ["4K", "无水印", "官方线路-C"]
-
-# 拉取失败的线路是否从列表里丢掉。
-# False = 保持原样(会留一个空标签页), True = 直接不显示。
-DROP_EMPTY_SOURCES = False
-
 
 class Spider(Spider):
 
@@ -152,64 +119,30 @@ class Spider(Spider):
         url = f'{self.host}/api/v1/movie/detail?pack={bba[0]}&signature={bba[1]}'
         data = self.fetch(url, headers=self.header()).json()['data']
         video = {'vod_name': data.get('name'),'type_name': data.get('type_name'),'vod_year': data.get('year'),'vod_area': data.get('area'),'vod_remarks': data.get('dynami'),'vod_content': data.get('content')}
-
-        # entries[i] = [原始顺序, 线路名, 播放列表]; 播放列表为 None 表示待异步拉取
-        # 用索引对齐而不是两次独立 append, 从根上避免 names/play 错位
-        entries = []
+        play = []
+        names = []
         tasks = []
-        for i, itt in enumerate(data["play_from"]):
+        for itt in data["play_from"]:
+            name = itt["name"]
+            a = []
             if len(itt["list"]) > 0:
-                entries.append([i, itt["name"], self.playeach(itt['list'])])
+                names.append(name)
+                play.append(self.playeach(itt['list']))
             else:
-                entries.append([i, itt["name"], None])
-                tasks.append((i, itt["code"]))
-
+                tasks.append({"movie_id": ids[0], "from_code": itt["code"]})
+                names.append(name)
         if tasks:
             with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-                results = list(executor.map(
-                    self.playlist,
-                    [{"movie_id": ids[0], "from_code": code} for _, code in tasks]
-                ))
-            for (i, _code), result in zip(tasks, results):
-                entries[i][2] = result if result else ""
-
-        entries = self.sortSources(entries)
-
-        names = [e[1] for e in entries]
-        play = [e[2] for e in entries]
-        if DROP_EMPTY_SOURCES:
-            pairs = [(n, p) for n, p in zip(names, play) if p]
-            names = [n for n, _ in pairs]
-            play = [p for _, p in pairs]
-
+                results = executor.map(self.playlist, tasks)
+                for result in results:
+                    if result:
+                        play.append(result)
+                    else:
+                        play.append("")
         video["vod_play_from"] = "$$$".join(names)
         video["vod_play_url"] = "$$$".join(play)
         result = {"list": [video]}
         return result
-
-    def sortSources(self, entries):
-        """按 SOURCE_PRIORITY 把指定线路提到前面, 其余保持接口原顺序(稳定排序)"""
-        if not SOURCE_PRIORITY:
-            return entries
-        rank = {}
-        taken = set()
-        for pos, key in enumerate(SOURCE_PRIORITY):
-            nk = self.normName(key)
-            if not nk:
-                continue
-            for idx, entry in enumerate(entries):
-                if idx in taken:
-                    continue
-                if nk in self.normName(entry[1]):
-                    rank[idx] = pos
-                    taken.add(idx)
-                    break
-        fallback = len(SOURCE_PRIORITY)
-        order = sorted(range(len(entries)), key=lambda k: (rank.get(k, fallback), entries[k][0]))
-        return [entries[k] for k in order]
-
-    def normName(self, name):
-        return re.sub(r'[\s\-_（）()【】\[\]]+', '', str(name)).lower()
 
     def searchContent(self, key, quick, pg=1):
         body = {"keyword": key, "sort": "", "type_id": "0", "page": str(pg), "pageSize": "10",
@@ -236,19 +169,11 @@ class Spider(Spider):
                 data2 = self.fetch(f"{self.host}/api/v1/movie_addr/parse_url?pack={bba[0]}&signature={bba[1]}",
                                    headers=self.header()).json()['data']
                 url = data2.get('play_url') or data2.get('download_url')
-                # 预检只是为了拿 302 的 Location。
-                # 必须带 stream=True: 不加的话 requests 会把整个响应体读下来,
-                # B 线路是 337MB 的直链 MP4, 会把播放器活活拖死(有码流无画面)。
                 try:
-                    resp = self.fetch(url, headers=self.header(), allow_redirects=False, stream=True)
-                    url1 = resp.headers.get('Location')
-                    try:
-                        resp.close()
-                    except Exception:
-                        pass
+                    url1 = self.fetch(url, headers=self.header(), allow_redirects=False).headers['Location']
                     if url1 and "http" in url1:
                         url = url1
-                except Exception:
+                except:
                     pass
             except Exception as e:
                 pass
@@ -333,7 +258,7 @@ class Spider(Spider):
                     f"{it['episode_name']}${it['from_code']}|||{it['play_url']}|||{it['episode_id']}"
                 )
         return '#'.join(play_urls)
-
+    
     def voides(self, item):
         if item['name'] or item['title']:
             voide = {
