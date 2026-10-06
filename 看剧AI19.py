@@ -67,6 +67,11 @@ LINE_UNKNOWN = 50000   # 表中没有的新线路: 排在已知可用线路之�
 LINE_LIMIT = 18        # 详情页最多展示的线路数(每条 play_url 会重复全剧集, 别太大)
 
 
+def _is_hw4k(n):
+    """是否'含4K的海外线路'(用户最想要的那条)"""
+    return "海外" in n and (("4K" in n) or ("4k" in n))
+
+
 def _line_rank(n):
     """返回 (语义组, 速度). 组: 0=含4K的海外 1=其他海外 2=已知线路 3=官方未知 4=其他"""
     if not n:
@@ -312,6 +317,32 @@ class Spider(Spider):
             "list": [self._vod(c) for c in cards],
         }
 
+    def _collect_lines(self, eps):
+        """采集线路名(已排序). 服务端对**每一集**返回的 line_options 并不一致 ——
+        实测同一部剧第1集可能没有'4K海外'而末集有(反之亦然), 只探第1集会漏线路。
+        这里按 首集/中间集/末集 探测并取并集; 一旦命中含4K的海外线路立即收工,
+        保证绝大多数情况仍只有 1 次请求, 不拖慢详情页。"""
+        toks, seen_tok = [], set()
+        ec = len(eps)
+        idxs = [0, ec // 4, ec // 2, (3 * ec) // 4, ec - 1]
+        for i in idxs:
+            t = (eps[i].get("token") if 0 <= i < len(eps) else None)
+            if t and t not in seen_tok:
+                seen_tok.add(t)
+                toks.append(t)
+        names, seen = [], set()
+        for i, t in enumerate(toks):
+            rj = self._req("GET", "/v1/playback/resolve/%s" % t)
+            for lo in (rj.get("line_options") or []):
+                n = lo.get("provider_name") or lo.get("label") or ""
+                if n and n not in seen:
+                    seen.add(n)
+                    names.append(n)
+            if any(_is_hw4k(n) for n in names):
+                break                                # 已拿到 4K海外, 不必再探
+        names.sort(key=_line_rank)                    # 稳定的: 未收录线路保持服务端原相对顺序
+        return names[:LINE_LIMIT]
+
     def detailContent(self, ids):
         if isinstance(ids, list):
             vid = ids[0] if ids else ""
@@ -333,20 +364,10 @@ class Spider(Spider):
             urls.append("%s$%s" % (name, tok))
         play_from, play_url = "kanju", "#".join(urls)
         if eps and urls:
-            tok0 = eps[0].get("token")
-            if tok0:
-                rj = self._req("GET", "/v1/playback/resolve/%s" % tok0)
-                names, seen = [], set()
-                for lo in (rj.get("line_options") or []):
-                    n = lo.get("provider_name") or lo.get("label") or ""
-                    if n and n not in seen:
-                        seen.add(n)
-                        names.append(n)
-                names.sort(key=_line_rank)          # 稳定的: 未收录线路保持服务端原相对顺序
-                names = names[:LINE_LIMIT]
-                if names:
-                    play_from = "$$$".join(names)
-                    play_url = "$$$".join(["#".join(urls)] * len(names))
+            names = self._collect_lines(eps)
+            if names:
+                play_from = "$$$".join(names)
+                play_url = "$$$".join(["#".join(urls)] * len(names))
         kind = d.get("content_kind") or ""
         remark = d.get("remarks") or ""
         if kind and kind != "movie" and d.get("episode_count"):
