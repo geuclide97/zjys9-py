@@ -46,50 +46,6 @@ CATEGORIES = {
     "anime": "动漫", "variety": "综艺", "documentary": "纪录片",
 }
 
-# ---------------------------------------------------------------------------
-# 线路排序: 本机(国内宽带)实测起播耗时, 2026-10-06 22:33 晚高峰, 三轮取中位数
-# 起播 = DNS+TCP+TLS+主/子 playlist TTFB + 首个 ts 分片下载完成, 单位 ms
-# 服务端 line_options 返回顺序不稳定且含大量慢/死线路, 这里强制重排
-# ---------------------------------------------------------------------------
-LINE_SPEED = {
-    "4K海外-官方C": 335, "海外-官方C": 533, "无水印资源": 707, "1080P-官方S": 756,
-    "iqiyi资源": 1006, "无尽资源": 1050, "新浪资源": 1081, "ikun资源": 1093,
-    "最大资源": 1138, "魔都资源": 1164, "牛牛资源": 1167, "索尼资源": 1184,
-    "1080P-官方R": 1188, "速播资源": 1480, "1080P-官方V": 1574, "1080P-官方Z": 1642,
-    "360资源": 2139, "电影天堂资源": 2165, "豆瓣资源": 2178, "1080zyk": 2346,
-    "高清-官方B": 2416, "金鹰资源": 3162, "豪华资源": 3530, "红牛资源": 4238,
-    "猫眼资源": 4421, "腾讯视频": 5778, "茅台资源": 6562, "西瓜资源": 8997,
-    # 实测不可用(连接拒绝/403/404), 保留但一律垫底
-    "极速资源": 99900, "暴风资源": 99901, "U酷资源": 99902,
-    "非凡资源": 99903, "量子资源": 99904,
-}
-# 人工覆盖: 优先级高于上面的实测值(值越小越靠前)。用于"这条有广告了/别排前面"这类
-# 主观判断, 实测数据本身不动。以后要调顺序只改这里即可。
-LINE_PIN = {
-    "iqiyi资源": 700,      # 2026-10-06 用户指定: 排在 1080P-官方S(756) 之前
-    "无水印资源": 2000,     # 2026-10-06 用户反馈已带广告: 从实测第3名沉到靠后(总第16位)
-}
-LINE_UNKNOWN = 50000   # 表中没有的新线路: 排在已知可用线路之后
-LINE_LIMIT = 18        # 详情页最多展示的线路数(每条 play_url 会重复全剧集, 别太大)
-
-
-def _is_hw4k(n):
-    """是否'含4K的海外线路'(用户最想要的那条)"""
-    return "海外" in n and (("4K" in n) or ("4k" in n))
-
-
-def _line_rank(n):
-    """返回 (语义组, 速度). 组: 0=含4K的海外 1=其他海外 2=已知线路 3=官方未知 4=其他"""
-    if not n:
-        return 9, 999999
-    has_4k = ("4K" in n) or ("4k" in n)
-    has_hw = "海外" in n
-    if n in LINE_SPEED or n in LINE_PIN:
-        g = 0 if (has_hw and has_4k) else (1 if has_hw else 2)
-        return g, LINE_PIN.get(n, LINE_SPEED.get(n, LINE_UNKNOWN))
-    g = 0 if (has_hw and has_4k) else (1 if has_hw else (3 if "官方" in n else 4))
-    return g, LINE_UNKNOWN
-
 # 实测各 genre 取值服务端均真实过滤(假类型返回0条)
 GENRES = {
     "movie": ["动作", "冒险", "剧情", "喜剧", "奇幻", "古装", "家庭", "科幻"],
@@ -323,32 +279,6 @@ class Spider(Spider):
             "list": [self._vod(c) for c in cards],
         }
 
-    def _collect_lines(self, eps):
-        """采集线路名(已排序). 服务端对**每一集**返回的 line_options 并不一致 ——
-        实测同一部剧第1集可能没有'4K海外'而末集有(反之亦然), 只探第1集会漏线路。
-        这里按 首集/中间集/末集 探测并取并集; 一旦命中含4K的海外线路立即收工,
-        保证绝大多数情况仍只有 1 次请求, 不拖慢详情页。"""
-        toks, seen_tok = [], set()
-        ec = len(eps)
-        idxs = [0, ec // 4, ec // 2, (3 * ec) // 4, ec - 1]
-        for i in idxs:
-            t = (eps[i].get("token") if 0 <= i < len(eps) else None)
-            if t and t not in seen_tok:
-                seen_tok.add(t)
-                toks.append(t)
-        names, seen = [], set()
-        for i, t in enumerate(toks):
-            rj = self._req("GET", "/v1/playback/resolve/%s" % t)
-            for lo in (rj.get("line_options") or []):
-                n = lo.get("provider_name") or lo.get("label") or ""
-                if n and n not in seen:
-                    seen.add(n)
-                    names.append(n)
-            if any(_is_hw4k(n) for n in names):
-                break                                # 已拿到 4K海外, 不必再探
-        names.sort(key=_line_rank)                    # 稳定的: 未收录线路保持服务端原相对顺序
-        return names[:LINE_LIMIT]
-
     def detailContent(self, ids):
         if isinstance(ids, list):
             vid = ids[0] if ids else ""
@@ -370,10 +300,20 @@ class Spider(Spider):
             urls.append("%s$%s" % (name, tok))
         play_from, play_url = "kanju", "#".join(urls)
         if eps and urls:
-            names = self._collect_lines(eps)
-            if names:
-                play_from = "$$$".join(names)
-                play_url = "$$$".join(["#".join(urls)] * len(names))
+            tok0 = eps[0].get("token")
+            if tok0:
+                rj = self._req("GET", "/v1/playback/resolve/%s" % tok0)
+                names, seen = [], set()
+                for lo in (rj.get("line_options") or []):
+                    n = lo.get("provider_name") or lo.get("label") or ""
+                    if n and n not in seen:
+                        seen.add(n)
+                        names.append(n)
+                    if len(names) >= 12:
+                        break
+                if names:
+                    play_from = "$$$".join(names)
+                    play_url = "$$$".join(["#".join(urls)] * len(names))
         kind = d.get("content_kind") or ""
         remark = d.get("remarks") or ""
         if kind and kind != "movie" and d.get("episode_count"):
