@@ -63,6 +63,12 @@ LINE_SPEED = {
     "极速资源": 99900, "暴风资源": 99901, "U酷资源": 99902,
     "非凡资源": 99903, "量子资源": 99904,
 }
+# 人工覆盖: 优先级高于上面的实测值(值越小越靠前)。用于"这条有广告了/别排前面"这类
+# 主观判断, 实测数据本身不动。以后要调顺序只改这里即可。
+LINE_PIN = {
+    "iqiyi资源": 700,      # 2026-10-06 用户指定: 排在 1080P-官方S(756) 之前
+    "无水印资源": 2000,     # 2026-10-06 用户反馈已带广告: 从实测第3名沉到靠后(总第16位)
+}
 LINE_UNKNOWN = 50000   # 表中没有的新线路: 排在已知可用线路之后
 LINE_LIMIT = 18        # 详情页最多展示的线路数(每条 play_url 会重复全剧集, 别太大)
 
@@ -78,9 +84,9 @@ def _line_rank(n):
         return 9, 999999
     has_4k = ("4K" in n) or ("4k" in n)
     has_hw = "海外" in n
-    if n in LINE_SPEED:
+    if n in LINE_SPEED or n in LINE_PIN:
         g = 0 if (has_hw and has_4k) else (1 if has_hw else 2)
-        return g, LINE_SPEED[n]
+        return g, LINE_PIN.get(n, LINE_SPEED.get(n, LINE_UNKNOWN))
     g = 0 if (has_hw and has_4k) else (1 if has_hw else (3 if "官方" in n else 4))
     return g, LINE_UNKNOWN
 
