@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-# 影探4K：由 影探4k.js 移植到鱼壳 webhtv 站点注入使用的 Python Spider。
-# 用法：把本文件放到手机 /sdcard/py/影探4K.py，站点配置 api 填 file:///sdcard/py/影探4K.py
+# 影探4K 鱼壳webhtv Python Spider【修复版】
+# 修复点：cms域名替换 vipcms.lyyytv.cn，https适配、容错增强、解析失败降级
+# 用法：放到手机 /sdcard/py/影探4K.py，api填 file:///sdcard/py/影探4K.py
 import base64
 import json
 import re
@@ -19,21 +20,18 @@ except ImportError:
     from base.spider import Spider
 
 KEY = 'yingtan4k'
-HOST = 'http://cms.lyyytv.cn'
+# ========== 核心修复：替换为VIPCMS域名 ==========
+HOST = 'https://vipcms.lyyytv.cn'
 CMS_KEY = 'wP5bvxoc3yv7FoBQENFZuAF0EUYr4LTy'
 
-# 解析接口（对齐 yt4k.js：fys.lyyytv.cn / parsesId=3）
+# 解析接口（fys失效后，你也可以后续自行替换别的解析地址）
 PARSE_API = 'http://fys.lyyytv.cn/api/index?parsesId=3&appid=10001&videoUrl='
 HEADERS = {'User-Agent': 'okhttp/4.12.0'}
-# 解析请求/回源头：对齐 JS 的 PH，避免 gzip 花屏
 PARSE_HEADERS = {'User-Agent': 'okhttp/4.12.0', 'Accept-Encoding': 'identity'}
 
-# baidu.con 前缀加密常量（对齐 yt4k.js）
 DEC_PREFIX = 'https://baidu.con/'
-# 解析重试轮数与退避基数（秒）
 PARSE_ROUNDS = 3
 PARSE_BACKOFF = 0.35
-# 同一原始地址解析结果缓存窗口（秒）
 PLAY_CACHE_TTL = 120
 
 PAGE_LIMIT = 20
@@ -79,14 +77,17 @@ def object_of(value):
 
 def get_json(url, headers=None, timeout=15):
     headers = HEADERS if headers is None else headers
-    rsp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
     try:
-        data = object_of(rsp.json())
-    except Exception:
-        data = {}
-    if not data:
-        raise Exception('影探4K：接口未返回有效 JSON')
-    return data
+        rsp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+        try:
+            data = object_of(rsp.json())
+        except Exception:
+            data = {}
+        if not data:
+            raise Exception('影探4K：接口未返回有效 JSON')
+        return data
+    except Exception as e:
+        raise Exception(f'影探4K：请求异常 {str(e)}')
 
 
 def cms(path, params=None):
@@ -223,7 +224,6 @@ def resolve_parse(body):
             return ''
         key = rest[:16].encode('utf-8')
         cipher_b64 = rest[16:]
-        # 优先按 base64 密文解密
         try:
             encrypted = base64.b64decode(cipher_b64, validate=False)
             cipher = AES.new(key, AES.MODE_CBC, key)
@@ -233,7 +233,6 @@ def resolve_parse(body):
                 return result
         except Exception:
             pass
-        # 兜底：密文本身是 raw bytes
         try:
             raw = cipher_b64.encode('latin-1', errors='ignore')
             if raw and len(raw) % 16 == 0:
@@ -258,13 +257,13 @@ def parse_url(raw):
         if rnd > 0:
             time.sleep(rnd * PARSE_BACKOFF)
         try:
-            rsp = requests.get(target, headers=PARSE_HEADERS, timeout=30)
+            rsp = requests.get(target, headers=PARSE_HEADERS, timeout=25)
             if rsp.status_code == 200 and rsp.text:
                 resolved = resolve_parse(rsp.text)
                 if resolved and resolved.startswith('http'):
                     return resolved
         except Exception:
-            pass
+            continue
     return ''
 
 
@@ -279,7 +278,10 @@ def home(extend=''):
     cached = _home_cache.get(cache_key)
     if cached and cached[0] > time.time():
         return cached[1]
-    data = cms('nav', {'token': ''})
+    try:
+        data = cms('nav', {'token': ''})
+    except Exception:
+        return {'class': [], 'filters': {}}
     classes = []
     filters = {}
     for item in list_of(data.get('list')):
@@ -310,7 +312,10 @@ def home(extend=''):
 
 
 def home_vod():
-    data = cms('index_video', {'token': ''})
+    try:
+        data = cms('index_video', {'token': ''})
+    except Exception:
+        return {'list': []}
     vlist = []
     for item in list_of(data.get('list')):
         if isinstance(item, dict):
@@ -362,7 +367,11 @@ def category(tid, pg, extend):
         value = text(extend.get(key))
         if value and value != 'all':
             params[key] = value
-    return paginated(cms('video', params), page)
+    try:
+        ret_data = cms('video', params)
+    except Exception:
+        ret_data = {'list': []}
+    return paginated(ret_data, page)
 
 
 def playlist(value):
@@ -383,7 +392,10 @@ def detail(ids):
         vid = text(vid)
         if not vid:
             continue
-        data = cms('video_detail', {'id': vid}).get('data')
+        try:
+            data = cms('video_detail', {'id': vid}).get('data')
+        except Exception:
+            continue
         if not isinstance(data, dict):
             continue
         players = data.get('vod_url_with_player')
@@ -418,7 +430,10 @@ def search(key, pg):
     page = page_of(pg)
     if not wd:
         return paginated({'list': []}, page)
-    data = cms('search', {'text': wd, 'pg': str(page)})
+    try:
+        data = cms('search', {'text': wd, 'pg': str(page)})
+    except Exception:
+        return paginated({'list': []}, page)
     lst = []
     for item in list_of(data.get('list')):
         if isinstance(item, dict):
@@ -433,13 +448,11 @@ def play(play_id):
     if not original:
         return {'parse': 0, 'url': '', 'header': dict(PARSE_HEADERS)}
 
-    # 兼容老加密：ldmax 前缀先本地解密
     if is_ldmax_url(original):
         decrypted = decrypt_ldmax(original)
         if decrypted:
             original = decrypted
 
-    # 解析结果缓存
     now = time.time()
     cached = _play_cache.get(original)
     if cached and cached[0] > now:
