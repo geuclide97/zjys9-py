@@ -246,14 +246,18 @@ class Spider(Spider):
             return text
 
     # 统一会话请求封装 对齐参考http_get/http_post
-    def http_get(self, url, headers=None, timeout=10):
+    def http_get(self, url, headers=None, timeout=10, **kw):
+        # 兼容壳传 allow_redirects / stream / verify 等额外参数
+        kw.pop('verify', None)
         if requests:
             if not self._session:
                 self._session = requests.Session()
-            return self._session.get(url, headers=headers or self.headers_default, timeout=timeout, verify=False)
+            return self._session.get(url, headers=headers or self.headers_default, timeout=timeout, verify=False, **kw)
         return self.fetch(url, headers=headers)
 
-    def http_post(self, url, headers=None, json=None, timeout=10):
+
+    def http_post(self, url, headers=None, json=None, timeout=10, **kw):
+        kw.pop('allow_redirects', None); kw.pop('verify', None)
         if requests:
             if not self._session:
                 self._session = requests.Session()
