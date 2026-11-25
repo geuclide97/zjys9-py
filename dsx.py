@@ -346,6 +346,9 @@ class Spider(BaseSpider):
             code, name, urls = str(src.get("code") or ""), str(src.get("name") or ""), src.get("url") or ""
             if not code or not name or code in seen:
                 continue
+            # 过滤广告解析源（澳门人脉-勿信广告 等）
+            if any(k in name for k in ("人脉", "澳门", "勿信广告", "勿信")):
+                continue
             seen.add(code)
             eps, labels = [], {}
             for part in urls.split("#"):
